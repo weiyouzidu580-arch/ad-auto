@@ -1,5 +1,6 @@
 package com.wisight.adauto.core
 
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 
 enum class AdActionType {
@@ -198,8 +199,16 @@ object AdRules {
     /**
      * 在页面节点集合中查找广告并决定执行的动作。
      * 返回 null 表示当前界面未检测到广告。
+     *
+     * @param screenW/screenH 当前屏幕尺寸（像素）。用于对“广告”角标这类位置敏感的
+     *        特征做位置过滤；为 0 时跳过位置过滤（向后兼容直接调用）。
      */
-    fun match(nodes: List<AccessibilityNodeInfo>, pageText: String): AdAction? {
+    fun match(
+        nodes: List<AccessibilityNodeInfo>,
+        pageText: String,
+        screenW: Int = 0,
+        screenH: Int = 0,
+    ): AdAction? {
         // 去掉空白后做匹配，兼容“上滑 继续看短剧”这类带空格写法
         val compactText = pageText.replace(Regex("\\s+"), "")
 
@@ -237,6 +246,19 @@ object AdRules {
             return AdAction(AdActionType.SWIPE_UP, claimCta, reason = "穿山甲广告(立即领取)")
         }
 
+        // 1.6) Pangle 全屏广告的“广告”角标（竖屏/横屏统一）：
+        // 全屏视频广告的提示文字（“上滑继续观看”等）画在视频 Surface 上，无障碍树读不到，
+        // 但右上角的“广告”角标是原生节点、能稳定读到，横竖屏都会出现。
+        // 只要页面上没有倒计时（倒计时走“点中心暂停”流程）、不是“X秒后进入广告”前置提示
+        // （正剧仍在播），且没有正剧播放控件（上方 hasPlaybackControls 已拦截），
+        // 就判定为广告并直接上滑划走。
+        if (!hasCountdown(pageText) && !hasUpcomingAd(pageText)) {
+            val badge = findAdBadgeNode(nodes, screenW, screenH)
+            if (badge != null) {
+                return AdAction(AdActionType.SWIPE_UP, badge, reason = "穿山甲广告(角标)")
+            }
+        }
+
         // 广告上下文：出现“广告”字样，或倒计时（如 “5秒后可继续”、“3s”)
         val countdownFound = hasCountdown(pageText)
         val adContextFound = hasAdContext(pageText)
@@ -263,6 +285,38 @@ object AdRules {
             }
         }
 
+        return null
+    }
+
+    /**
+     * 查找 Pangle 全屏广告的“广告”角标节点：文字或内容描述为“广告”，且位于屏幕**右上角**。
+     * - Pangle 全屏广告的 disclosure 角标统一放在屏幕右上角，竖屏/横屏一致；
+     * - 只按相对坐标判定（右上角区域），不依赖具体方向，横竖屏通用；
+     * - 首页/信息流没有这种右上角“广告”角标，不会误判。
+     */
+    private fun findAdBadgeNode(
+        nodes: List<AccessibilityNodeInfo>,
+        screenW: Int,
+        screenH: Int,
+    ): AccessibilityNodeInfo? {
+        if (screenW <= 0 || screenH <= 0) return null
+        // 右上角区域：顶部 ~28% 高度、右部 ~40% 宽度（Pangle 角标固定右上角）
+        val topLimit = screenH * 0.28f
+        val rightLimit = screenW * 0.60f
+        for (n in nodes) {
+            val t = n.text?.toString().orEmpty().trim()
+            val d = n.contentDescription?.toString().orEmpty().trim()
+            if (t != "广告" && d != "广告") continue
+            // 角标本身不可点（可点的是广告容器/按钮），进一步降低误判
+            if (n.isClickable) continue
+            val r = Rect()
+            n.getBoundsInScreen(r)
+            if (r.isEmpty) continue
+            val cx = (r.left + r.right) / 2f
+            val cy = (r.top + r.bottom) / 2f
+            if (cy > topLimit || cx < rightLimit) continue
+            return n
+        }
         return null
     }
 

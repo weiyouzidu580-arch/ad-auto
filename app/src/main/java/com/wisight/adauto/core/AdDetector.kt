@@ -186,7 +186,10 @@ class AdDetector(private val service: AccessibilityService) {
         // 页面文本只拼接一次：关键字匹配与倒计时解析共用，避免重复遍历节点树导致主线程卡顿
         val pageText = AdRules.pageTextOf(nodes)
         val countdownFound = AdRules.hasCountdown(pageText)
-        val action = AdRules.match(nodes, pageText)
+        // 传入“活动窗口屏幕范围”，供“广告角标”等位置敏感特征做过滤。
+        // 用窗口根节点边界（与节点坐标同一坐标系），比 displayMetrics 更可靠（横竖屏通用）。
+        val frame = screenFrame()
+        val action = AdRules.match(nodes, pageText, frame?.width() ?: 0, frame?.height() ?: 0)
         if (action != null) {
             // 已通过“点中心暂停”确认暂停的广告：滑动锁定已解除，即使底部仍有倒计时文案
             // 也直接划走（暂停后“上滑”提示即满足条件）。
@@ -278,6 +281,34 @@ class AdDetector(private val service: AccessibilityService) {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /**
+     * 当前“屏幕范围”：活动应用窗口根节点的边界（与节点坐标同一坐标系）。
+     * 用于给“广告角标”等位置敏感特征做过滤；横竖屏都正确。
+     * 找不到活动应用窗口时退回 displayMetrics 的宽高。
+     */
+    private fun screenFrame(): Rect? {
+        val windows = try {
+            service.windows
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        for (w in windows) {
+            if (w.type != AccessibilityWindowInfo.TYPE_APPLICATION || !w.isActive) continue
+            val root = w.root ?: continue
+            try {
+                val r = Rect()
+                root.getBoundsInScreen(r)
+                if (!r.isEmpty) return r
+            } finally {
+                @Suppress("DEPRECATION")
+                try { root.recycle() } catch (_: Throwable) {}
+            }
+        }
+        // 兜底：用资源里的屏幕尺寸
+        val dm = service.resources.displayMetrics
+        return Rect(0, 0, dm.widthPixels, dm.heightPixels)
     }
 
     /**
