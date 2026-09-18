@@ -16,6 +16,12 @@ data class AdAction(
     val type: AdActionType,
     val node: AccessibilityNodeInfo? = null,
     val reason: String = "",
+    /**
+     * true = 不走“倒计时等待 / 点中心暂停”流程，直接执行动作。
+     * 直播样式广告整屏都是视频层、页面里没有任何文字，既读不到倒计时、也没有可用的
+     * 播放按钮，而点屏幕正中有“误入直播间”的风险，所以必须绕过暂停流程直接划走。
+     */
+    val immediate: Boolean = false,
 )
 
 /**
@@ -48,6 +54,26 @@ object AdRules {
 
     /** 广告上下文关键字，用于降低误触概率 */
     val AD_CONTEXT_KEYWORDS = listOf("广告", "advertisement")
+
+    /**
+     * 直播样式广告的渲染视图资源 id（`com.phoenix.read:id/ttlive_player_render_view`）。
+     *
+     * 红果新版广告（抖音直播样式创意）整屏渲染在这个 TextureView 上，**广告文案全部画在
+     * 视频层里**，无障碍树读不到任何文字 —— 上滑关键字、立即领取、广告角标、倒计时、
+     * 点击规则全部失效，这就是“直播广告跳不过”的根因。
+     *
+     * 该渲染视图是**具名 id**（非混淆），且只有这类广告才会挂上：
+     * 实测 5 份正剧样本（播放中 / 暂停 / 控件可见）全部是 `SurfaceView`、都不含此 id；
+     * 4+ 份直播广告样本全部含此 id（渲染视图为 `TextureView`）。
+     */
+    const val AD_RENDER_VIEW_ID = "ttlive_player_render_view"
+
+    /** “直播样式广告”的判定原因，供 AdDetector 识别该分支（直接划走 + 更长冷却） */
+    const val REASON_LIVE_AD = "直播广告(渲染视图)"
+
+    /** 节点集合里是否存在直播广告的渲染视图（页面无文字可读，只能靠这个具名 id 判定）。 */
+    fun hasAdRenderView(nodes: List<AccessibilityNodeInfo>): Boolean =
+        nodes.any { it.viewIdResourceName?.endsWith("/$AD_RENDER_VIEW_ID") == true }
 
     /**
      * 广告倒计时关键字（“3秒后可继续”“5s后继续观看”等）。
@@ -231,6 +257,24 @@ object AdRules {
         //    （显式上滑提示已在上面优先处理；此保护仅守护后面的“立即领取”启发式
         //    与点击规则，防止正常播放时误伤）
         if (hasPlaybackControls(pageText)) return null
+
+        // 1.7) 直播样式广告（红果新版）：
+        //     整屏广告创意画在视频层（TextureView `ttlive_player_render_view`）上，
+        //     无障碍树里**一个文字节点都没有** → 上面的上滑关键字 / 立即领取 / 广告角标 /
+        //     点击规则全部失效（这就是“直播广告跳不过”的根因）。
+        //     该渲染视图是具名 id 且广告独有（正剧始终走 SurfaceView），据此判定为广告 → 上滑。
+        //     位置放在正剧保护之后：万一将来正剧也复用它，正剧保护仍然优先。
+        if (hasAdRenderView(nodes)) {
+            val renderView = nodes.firstOrNull {
+                it.viewIdResourceName?.endsWith("/$AD_RENDER_VIEW_ID") == true
+            }
+            return AdAction(
+                AdActionType.SWIPE_UP,
+                renderView,
+                reason = REASON_LIVE_AD,
+                immediate = true,
+            )
+        }
 
         // 1.5) 穿山甲 SurfaceView 视频广告（红果短剧等）：
         // 广告提示词画在视频 Surface 上，无障碍树读不到任何文字（关键字匹配失效）。
