@@ -100,6 +100,49 @@ class AdDetector(private val service: AccessibilityService) {
         }
     }
 
+    /** 倒计时广告的最终上滑：独立于界面事件，防止倒计时结束后红果不再触发无障碍事件。 */
+    private var countdownSwipePackage: String? = null
+    private var countdownSwipeDeadlineAt = 0L
+    private val countdownSwipeRunnable = Runnable {
+        val armedPkg = countdownSwipePackage
+        countdownSwipePackage = null
+        countdownSwipeDeadlineAt = 0L
+        if (!SettingsManager.adSkipEnabled || armedPkg == null) return@Runnable
+
+        val fgPkg = foregroundPackage() ?: return@Runnable
+        if (fgPkg != armedPkg) return@Runnable
+        if (!SettingsManager.genericModeEnabled && fgPkg !in SettingsManager.supportedPackagesList()) return@Runnable
+
+        val nodes = ArrayList<AccessibilityNodeInfo>()
+        collectFromAllWindows(nodes, fgPkg)
+        try {
+            val pageText = AdRules.pageTextOf(nodes)
+            if (AdRules.hasPlaybackControls(pageText) || AdRules.hasUpcomingAd(pageText)) {
+                Log.i(TAG, "倒计时到点，但已回到正剧/前置提示，取消最终上滑")
+                return@Runnable
+            }
+            Log.i(TAG, "倒计时到点且仍在广告页，主动执行最终上滑")
+            val ok = swipe(up = true)
+            Log.i(TAG, "倒计时最终上滑${if (ok) "已派发" else "派发失败"}")
+            if (ok) {
+                val now = SystemClock.uptimeMillis()
+                nextAllowedAt = now + minActionInterval
+                lastActionAt = now
+            }
+        } finally {
+            recycleAll(nodes)
+            countdownDeadlineAt = 0L
+            lastParsedSeconds = -1
+            handler.removeCallbacks(countdownSwipeRunnable)
+            countdownSwipePackage = null
+            countdownSwipeDeadlineAt = 0L
+            pauseState = PauseState.NONE
+            pauseTappedAt = 0L
+            pauseConfirmedAt = 0L
+            pauseFlowDisabledUntil = 0L
+        }
+    }
+
     /** 两次跳过动作之间的最小间隔，避免重复触发 */
     private val minActionInterval = 1500L
     /**
@@ -235,6 +278,7 @@ class AdDetector(private val service: AccessibilityService) {
             // 新版策略是点击屏幕中间暂停视频（暂停后出现播放按钮），暂停即可直接划走，
             // 不必被动等倒计时走完。暂停流程若超时/不适用，则回退到原来的“等倒计时结束再滑”。
             if (!pausedAndSwipe && action.type == AdActionType.SWIPE_UP && withinCountdownWindow(pageText)) {
+                armCountdownFinalSwipe(fgPkg)
                 if (enterPauseBeforeSwipe(fgPkg)) {
                     onResult("检测到需倒计时的广告，正在点中心暂停后直接划走")
                     recycleAll(nodes)
@@ -320,6 +364,7 @@ class AdDetector(private val service: AccessibilityService) {
             }
             // 只在真正的广告页（非前置提示、非正剧播放）里尝试“点中心暂停”
             if ((countdownFound && !upcomingAd && !inPlayback) || pauseState != PauseState.NONE) {
+                if (withinCountdownWindow(pageText)) armCountdownFinalSwipe(fgPkg)
                 if (enterPauseBeforeSwipe(fgPkg)) {
                     onResult("检测到广告上下文，正在暂停视频以直接跳过")
                     recycleAll(nodes)
@@ -442,6 +487,19 @@ class AdDetector(private val service: AccessibilityService) {
         handler.postDelayed(retryRunnable, delay)
     }
 
+    /** 为当前倒计时广告安排一个不依赖无障碍事件的最终上滑。 */
+    private fun armCountdownFinalSwipe(fgPkg: String) {
+        val deadline = countdownDeadlineAt
+        if (deadline <= 0L) return
+        if (countdownSwipePackage == fgPkg && countdownSwipeDeadlineAt == deadline) return
+        handler.removeCallbacks(countdownSwipeRunnable)
+        countdownSwipePackage = fgPkg
+        countdownSwipeDeadlineAt = deadline
+        val delay = (deadline - SystemClock.uptimeMillis()).coerceAtLeast(80L)
+        Log.i(TAG, "已锁定倒计时最终上滑：${delay}ms 后执行")
+        handler.postDelayed(countdownSwipeRunnable, delay)
+    }
+
     /**
      * “需要倒计时等待”的广告：通过“点击屏幕中间让视频暂停”立即解锁滑动。
      *
@@ -508,8 +566,7 @@ class AdDetector(private val service: AccessibilityService) {
                     pauseConfirmedAt = 0L
                     pauseTappedAt = 0L
                     pauseFlowDisabledUntil = 0L
-                    countdownDeadlineAt = 0L
-                    lastParsedSeconds = -1
+                    // 倒计时未结束时红果可能忽略这次手势，保留最终上滑定时器。
                     nextAllowedAt = now + minActionInterval
                     lastActionAt = now
                     return true
