@@ -133,9 +133,7 @@ class AdDetector(private val service: AccessibilityService) {
             recycleAll(nodes)
             countdownDeadlineAt = 0L
             lastParsedSeconds = -1
-            handler.removeCallbacks(countdownSwipeRunnable)
-            countdownSwipePackage = null
-            countdownSwipeDeadlineAt = 0L
+
             pauseState = PauseState.NONE
             pauseTappedAt = 0L
             pauseConfirmedAt = 0L
@@ -182,6 +180,9 @@ class AdDetector(private val service: AccessibilityService) {
             // 新窗口 = 新上下文：重置倒计时等待/暂停流程状态，避免跨广告沿用旧状态
             countdownDeadlineAt = 0L
             lastParsedSeconds = -1
+            handler.removeCallbacks(countdownSwipeRunnable)
+            countdownSwipePackage = null
+            countdownSwipeDeadlineAt = 0L
             pauseState = PauseState.NONE
             pauseTappedAt = 0L
             pauseConfirmedAt = 0L
