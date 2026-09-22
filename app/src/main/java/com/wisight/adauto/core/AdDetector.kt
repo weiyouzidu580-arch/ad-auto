@@ -38,7 +38,9 @@ class AdDetector(private val service: AccessibilityService) {
         private const val MAX_COUNTDOWN_SECONDS = 30
         /** 点中心暂停后，等待“中间播放按钮出现”的确认超时（毫秒） */
         private const val PAUSE_CONFIRM_TIMEOUT_MS = 4_000L
-        /** 已确认暂停后，等待底部“上滑”提示出现的最长时间（毫秒），超时则回退原逻辑 */
+        /** 确认广告已暂停后，直接上滑前留一点 UI 稳定时间 */
+        private const val PAUSED_DIRECT_SWIPE_DELAY_MS = 450L
+        /** 已确认暂停后，直接上滑失败时的最长兜底等待（毫秒） */
         private const val PAUSED_PROMPT_TIMEOUT_MS = 6_000L
         /** 一次暂停流程失败后，本广告内不再尝试点暂停的冷却时长（毫秒） */
         private const val PAUSE_FLOW_DISABLED_MS = 20_000L
@@ -486,13 +488,39 @@ class AdDetector(private val service: AccessibilityService) {
                 return true
             }
             PauseState.PAUSED -> {
-                // 已暂停：短周期重扫，直到底部“上滑继续观看”提示渲染出来（由 action 分支划走）。
-                // 若提示长时间未出现，说明该广告暂停并不能解锁滑动，回退原倒计时逻辑。
-                if (now - pauseConfirmedAt < PAUSED_PROMPT_TIMEOUT_MS) {
-                    scheduleRetry(PAUSE_RESCAN_MS, "等待上滑提示")
+                // 已经通过“中央播放按钮”确认这是被我们暂停的广告。
+                // 红果部分广告虽然肉眼已经显示“上滑继续观看短剧”，但不会继续发送稳定的
+                // Accessibility content-change 事件，旧逻辑可能一直等到用户截图/触屏后才再次扫描。
+                // 因此确认暂停后直接等待极短时间并主动上滑，不再依赖下一次界面事件或文字可访问性。
+                val pausedFor = now - pauseConfirmedAt
+                if (pausedFor < PAUSED_DIRECT_SWIPE_DELAY_MS) {
+                    scheduleRetry(
+                        (PAUSED_DIRECT_SWIPE_DELAY_MS - pausedFor).coerceAtLeast(50L),
+                        "广告已暂停，准备直接上滑",
+                    )
                     return true
                 }
-                Log.w(TAG, "已暂停但长时间未出现上滑提示，本广告回退倒计时等待逻辑")
+
+                Log.i(TAG, "广告已确认暂停 ${pausedFor}ms，直接执行上滑")
+                val ok = swipe(up = true)
+                if (ok) {
+                    pauseState = PauseState.NONE
+                    pauseConfirmedAt = 0L
+                    pauseTappedAt = 0L
+                    pauseFlowDisabledUntil = 0L
+                    countdownDeadlineAt = 0L
+                    lastParsedSeconds = -1
+                    nextAllowedAt = now + minActionInterval
+                    lastActionAt = now
+                    return true
+                }
+
+                // 极少数情况下手势派发失败：继续短周期重试，超过兜底窗口后回退倒计时逻辑。
+                if (pausedFor < PAUSED_PROMPT_TIMEOUT_MS) {
+                    scheduleRetry(PAUSE_RESCAN_MS, "直接上滑失败，重试")
+                    return true
+                }
+                Log.w(TAG, "广告已暂停但直接上滑持续失败，本广告回退倒计时等待逻辑")
                 pauseState = PauseState.NONE
                 pauseConfirmedAt = 0L
                 pauseFlowDisabledUntil = now + PAUSE_FLOW_DISABLED_MS
